@@ -57,6 +57,7 @@ func validateV1(ar admissionv1.AdmissionReview, cache *cache.Cache) (*admissionv
 		dryRun: ar.Request.DryRun,
 		cache:  cache,
 	}
+	warningValidatorRlsRules := rlsValidator{}
 
 	switch ar.Request.Operation {
 	case admissionv1.Create:
@@ -66,6 +67,8 @@ func validateV1(ar admissionv1.AdmissionReview, cache *cache.Cache) (*admissionv
 		cicnoc.setNext(&cfoc)
 
 		response, err := cicnoc.check(cr)
+		//warning rules
+		response, err = validateWarningRules(response, err, cr, &warningValidatorRlsRules)
 
 		return response, err
 
@@ -76,6 +79,8 @@ func validateV1(ar admissionv1.AdmissionReview, cache *cache.Cache) (*admissionv
 		cicnou.setNext(&cfou)
 
 		response, err := cicnou.check(cr)
+		//warning rules
+		response, err = validateWarningRules(response, err, cr, &warningValidatorRlsRules)
 
 		return response, err
 

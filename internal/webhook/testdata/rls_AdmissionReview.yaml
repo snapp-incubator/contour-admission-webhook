@@ -1,0 +1,92 @@
+---
+kind: AdmissionReview
+apiVersion: admission.k8s.io/v1
+request:
+  uid: 7feb799c-8315-4364-9251-0cae98a9a64b
+  kind:
+    group: projectcontour.io
+    version: v1
+    kind: HTTPProxy
+  resource:
+    group: projectcontour.io
+    version: v1
+    resource: httpproxies
+  requestKind:
+    group: projectcontour.io
+    version: v1
+    kind: HTTPProxy
+  requestResource:
+    group: projectcontour.io
+    version: v1
+    resource: httpproxies
+  name: echo
+  namespace: test
+  operation: CREATE
+  userInfo:
+    username: docker-for-desktop
+    groups:
+    - system:masters
+    - system:authenticated
+  object:
+    apiVersion: projectcontour.io/v1
+    kind: HTTPProxy
+    metadata:
+      creationTimestamp: '2024-04-15T14:15:31Z'
+      generation: 1
+      managedFields:
+      - apiVersion: projectcontour.io/v1
+        fieldsType: FieldsV1
+        fieldsV1:
+          f:spec:
+            ".": {}
+            f:ingressClassName: {}
+            f:routes: {}
+            f:virtualhost:
+              ".": {}
+              f:fqdn: {}
+        manager: kubectl-create
+        operation: Update
+        time: '2024-04-15T14:15:31Z'
+      name: echo
+      namespace: test
+      uid: '04180731-f36a-4acd-a770-614279ba193d'
+    spec:
+      ingressClassName: private
+      routes:
+      - conditions:
+        - prefix: "/"
+        rateLimitPolicy:
+          global:
+            descriptors:
+            - entries:
+              - genericKey:
+                  key: test.echo.limit1
+                  value: 3/m
+              - requestHeaderValueMatch:
+                  expectMatch: true
+                  headers:
+                  - exact: bar
+                    name: foo
+                  value: bar
+            - entries:
+              - genericKey:
+                  key: test.echo.limit2
+                  value: 4/m
+              - requestHeader:
+                  descriptorKey: id
+                  headerName: id
+            - entries:
+              - genericKey:
+                  key: test.echo.limit3
+                  value: 30/m
+        services:
+        - name: ingress-conformance-echo
+          port: 80
+      virtualhost:
+        fqdn: test.example.local
+  oldObject: 
+  dryRun: false
+  options:
+    kind: CreateOptions
+    apiVersion: meta.k8s.io/v1
+    fieldManager: kubectl-create

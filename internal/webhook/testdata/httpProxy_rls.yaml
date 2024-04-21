@@ -1,0 +1,38 @@
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: echo
+  namespace: test
+spec:
+  ingressClassName: private
+  virtualhost:
+    fqdn: test.example.local
+  routes:
+  - conditions:
+    - prefix: /
+    services:
+    - name: ingress-conformance-echo
+      port: 80
+    rateLimitPolicy:
+      global:
+        descriptors:
+          - entries:
+             - genericKey:
+                key: test.echo.limit1 # Namespace.Name.optional_Name
+                value: "3/m"
+             - requestHeaderValueMatch:
+                 headers:
+                 - name: foo
+                   exact: bar
+                 value: bar  
+          - entries:
+             - genericKey:
+                key: test.echo.limit2 # Namespace.Name.optional_Name
+                value: "4/m"
+             - requestHeader:
+                  headerName: id
+                  descriptorKey: id
+          - entries:
+              - genericKey:
+                  key: test.echo.limit3 # Namespace.Name.optional_Name
+                  value: "30/m"
