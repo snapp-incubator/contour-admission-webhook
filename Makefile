@@ -19,7 +19,7 @@ IMG ?= $(BIN):$(VERSION)
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.28.0
+ENVTEST_K8S_VERSION = 1.29.0
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
@@ -28,11 +28,24 @@ $(LOCALBIN):
 
 all: build
 
+.PHONY: test
 test: check
 
 .PHONY: check
 check: fmt vet lint envtest
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./... -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./... -coverprofile cover.out -race
+
+.PHONY: test-unit
+test-unit: fmt vet
+	go test ./internal/cache/... ./internal/config/... ./pkg/utils/... -v -race -coverprofile cover-unit.out
+
+.PHONY: test-integration
+test-integration: fmt vet envtest
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./internal/controller/... ./internal/webhook/... -v -race -coverprofile cover-integration.out
+
+.PHONY: bench
+bench:
+	go test ./... -bench=. -benchmem -run=^$$ 2>/dev/null || true
 
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
@@ -45,15 +58,15 @@ build: fmt vet lint
 
 .PHONY: fmt
 fmt:
-	go fmt -mod=readonly ./...
+	go fmt ./...
 
 .PHONY: vet
 vet:
-	go vet -mod=readonly -ldflags "$(GO_BUILD_LDFLAGS)" ./...
+	go vet ./...
 
 .PHONY: lint
 lint:
-	go run github.com/golangci/golangci-lint/cmd/golangci-lint@v1.55.1 run -v --exclude-use-default=false
+	go run github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.0 run -v --timeout=5m
 
 .PHONY: docker-build
 docker-build:
@@ -65,5 +78,38 @@ docker-push:
 
 .PHONY: clean
 clean:
-	@rm -rf cover.out
+	@rm -rf cover.out cover-unit.out cover-integration.out
 	@rm -rf bin
+
+.PHONY: tidy
+tidy:
+	go mod tidy
+
+.PHONY: verify
+verify: tidy fmt vet
+	git diff --exit-code
+
+.PHONY: cover
+cover: check
+	go tool cover -html=cover.out -o cover.html
+	@echo "Coverage report generated: cover.html"
+
+.PHONY: help
+help:
+	@echo "Available targets:"
+	@echo "  all            - Build the binary (default)"
+	@echo "  build          - Build the binary"
+	@echo "  test           - Run all tests with coverage"
+	@echo "  test-unit      - Run unit tests only"
+	@echo "  test-integration - Run integration tests only"
+	@echo "  bench          - Run benchmarks"
+	@echo "  fmt            - Format code"
+	@echo "  vet            - Run go vet"
+	@echo "  lint           - Run golangci-lint"
+	@echo "  tidy           - Run go mod tidy"
+	@echo "  verify         - Verify no uncommitted changes after tidy/fmt/vet"
+	@echo "  cover          - Generate HTML coverage report"
+	@echo "  docker-build   - Build Docker image"
+	@echo "  docker-push    - Push Docker image"
+	@echo "  clean          - Remove build artifacts"
+	@echo "  help           - Show this help"

@@ -33,16 +33,16 @@ import (
 
 // Constants for test configuration
 const (
-	defaultNamespace string = "default"
-	defaultName      string = "dummy"
-	finalizerString  string = "snappcloud.io/httpproxy-webhook-cache"
-	waitDuration            = 1 * time.Second
+	defaultNamespace = "default"
+	defaultName      = "dummy"
+	finalizerString  = "snappcloud.io/httpproxy-webhook-cache"
+	waitDuration     = 1 * time.Second
 )
 
 // Main block for testing httpproxy fqdn cache controller
 var _ = Describe("Testing httpproxy fqdn cache Controller", func() {
 	Context("Testing reconcile loop functionality", Ordered, func() {
-		// Utility function to get a sample httpproxy
+		// getSampleHttpproxy creates a sample HTTPProxy for testing
 		getSampleHttpproxy := func(name, namespace string) *contourv1.HTTPProxy {
 			return &contourv1.HTTPProxy{
 				ObjectMeta: metav1.ObjectMeta{
@@ -58,7 +58,7 @@ var _ = Describe("Testing httpproxy fqdn cache Controller", func() {
 			}
 		}
 
-		// Utility function to delete a httpproxy
+		// deleteHttpproxy deletes an HTTPProxy and waits for it to be removed
 		deleteHttpproxy := func(httpproxy *contourv1.HTTPProxy) {
 			Expect(k8sClient.Delete(context.Background(), httpproxy)).To(Succeed())
 
@@ -72,109 +72,133 @@ var _ = Describe("Testing httpproxy fqdn cache Controller", func() {
 		}
 
 		It("should not add a persisting cache entry for fqdn when httpproxy ingressClassName is invalid", func() {
-			// Get a sample httpproxy in the default namespace
 			httpproxyObj := getSampleHttpproxy(defaultName, defaultNamespace)
 			httpproxyObj.Spec.IngressClassName = "invalid"
 
-			// Create the httpproxy object and verify it succeeds
 			Expect(k8sClient.Create(context.Background(), httpproxyObj)).To(Succeed())
 
-			// Wait for a specified duration to ensure the state is stable
 			time.Sleep(waitDuration)
 
-			// Verify
 			cacheKey := utils.GenerateCacheKey(httpproxyObj.Spec.IngressClassName, httpproxyObj.Spec.VirtualHost.Fqdn)
-			Expect(cacheStore.KeyExists(cacheKey)).To(BeFalse())
+			Expect(cacheStore.Exists(cacheKey)).To(BeFalse())
 
-			// Cleanup
 			deleteHttpproxy(httpproxyObj)
 		})
 
 		It("should add a persisting cache entry for fqdn when a httpproxy object is created or updated", func() {
-			// Get a sample httpproxy in the default namespace
 			httpproxyObj := getSampleHttpproxy(defaultName, defaultNamespace)
 
-			// Create the httpproxy object and verify it succeeds
 			Expect(k8sClient.Create(context.Background(), httpproxyObj)).To(Succeed())
 
-			// Wait for a specified duration to ensure the state is stable
 			time.Sleep(waitDuration)
 
-			// Verify
 			cacheKey := utils.GenerateCacheKey(httpproxyObj.Spec.IngressClassName, httpproxyObj.Spec.VirtualHost.Fqdn)
-			Expect(cacheStore.KeyExists(cacheKey)).To(BeTrue())
-			Expect(*cacheStore.IsKeyPersisted(cacheKey)).To(BeTrue())
+			Expect(cacheStore.Exists(cacheKey)).To(BeTrue())
 
-			// Cleanup
+			isPersistent := cacheStore.IsPersistent(cacheKey)
+			Expect(isPersistent).NotTo(BeNil())
+			Expect(*isPersistent).To(BeTrue())
+
 			deleteHttpproxy(httpproxyObj)
 		})
 
 		It("should delete the persisting cache entry for fqdn when a httpproxy object is deleted", func() {
-			// Get a sample httpproxy in the default namespace
 			httpproxyObj := getSampleHttpproxy(defaultName, defaultNamespace)
 
-			// Create the httpproxy object and verify it succeeds
 			Expect(k8sClient.Create(context.Background(), httpproxyObj)).To(Succeed())
 
-			// Wait for a specified duration to ensure the state is stable
 			time.Sleep(waitDuration)
 
-			// Verify
 			cacheKey := utils.GenerateCacheKey(httpproxyObj.Spec.IngressClassName, httpproxyObj.Spec.VirtualHost.Fqdn)
-			Expect(cacheStore.KeyExists(cacheKey)).To(BeTrue())
-			Expect(*cacheStore.IsKeyPersisted(cacheKey)).To(BeTrue())
+			Expect(cacheStore.Exists(cacheKey)).To(BeTrue())
 
-			// Delete the httpproxy object and verify it succeeds
+			isPersistent := cacheStore.IsPersistent(cacheKey)
+			Expect(isPersistent).NotTo(BeNil())
+			Expect(*isPersistent).To(BeTrue())
+
 			Expect(k8sClient.Delete(context.Background(), httpproxyObj)).To(Succeed())
 
-			// Wait for a specified duration to ensure the state is stable
 			time.Sleep(waitDuration)
 
-			// Verify
-			Expect(cacheStore.KeyExists(cacheKey)).To(BeFalse())
+			Expect(cacheStore.Exists(cacheKey)).To(BeFalse())
 		})
 
 		It("should add finalizer string to httpproxy object when it is created or updated", func() {
-			// Get a sample httpproxy in the default namespace
 			httpproxyObj := getSampleHttpproxy(defaultName, defaultNamespace)
 
-			// Create the httpproxy object and verify it succeeds
 			Expect(k8sClient.Create(context.Background(), httpproxyObj)).To(Succeed())
 
-			// Wait for a specified duration to ensure the state is stable
 			time.Sleep(waitDuration)
 
-			// Retrieve the httpproxy object, ensuring the finalizer string is present
 			currentHttpproxyObj := contourv1.HTTPProxy{}
 			Expect(k8sClient.Get(context.Background(), types.NamespacedName{Namespace: defaultNamespace, Name: defaultName}, &currentHttpproxyObj)).To(Succeed())
 			Expect(currentHttpproxyObj.ObjectMeta.Finalizers).To(ContainElement(finalizerString))
 
-			// Cleanup
 			deleteHttpproxy(httpproxyObj)
 		})
 
 		It("should delete finalizer string from httpproxy object when it is deleted", func() {
-			// Get a sample httpproxy in the default namespace
 			httpproxyObj := getSampleHttpproxy(defaultName, defaultNamespace)
 
-			// Create the httpproxy object and verify it succeeds
 			Expect(k8sClient.Create(context.Background(), httpproxyObj)).To(Succeed())
 
-			// Wait for a specified duration to ensure the state is stable
 			time.Sleep(waitDuration)
 
-			// Retrieve the created httpproxy object and verify it succeeds
 			Expect(k8sClient.Get(context.Background(), types.NamespacedName{Namespace: defaultNamespace, Name: defaultName}, &contourv1.HTTPProxy{})).To(Succeed())
 
-			// Delete the httpproxy object and verify it succeeds
 			Expect(k8sClient.Delete(context.Background(), httpproxyObj)).To(Succeed())
 
-			// Wait for a specified duration to ensure the state is stable
 			time.Sleep(waitDuration)
 
-			// Verify the removal of finalizer string
 			Expect(apierrors.IsNotFound(k8sClient.Get(context.Background(), types.NamespacedName{Namespace: defaultNamespace, Name: defaultName}, &contourv1.HTTPProxy{}))).To(BeTrue())
 		})
 
+		It("should update cache when FQDN changes", func() {
+			httpproxyObj := getSampleHttpproxy(defaultName, defaultNamespace)
+
+			Expect(k8sClient.Create(context.Background(), httpproxyObj)).To(Succeed())
+
+			time.Sleep(waitDuration)
+
+			oldCacheKey := utils.GenerateCacheKey(httpproxyObj.Spec.IngressClassName, httpproxyObj.Spec.VirtualHost.Fqdn)
+			Expect(cacheStore.Exists(oldCacheKey)).To(BeTrue())
+
+			// Update the FQDN
+			currentObj := &contourv1.HTTPProxy{}
+			Expect(k8sClient.Get(context.Background(), types.NamespacedName{Namespace: defaultNamespace, Name: defaultName}, currentObj)).To(Succeed())
+
+			currentObj.Spec.VirtualHost.Fqdn = "updated.test.local"
+			Expect(k8sClient.Update(context.Background(), currentObj)).To(Succeed())
+
+			time.Sleep(waitDuration)
+
+			newCacheKey := utils.GenerateCacheKey(httpproxyObj.Spec.IngressClassName, "updated.test.local")
+			Expect(cacheStore.Exists(newCacheKey)).To(BeTrue())
+			Expect(cacheStore.Exists(oldCacheKey)).To(BeFalse())
+
+			deleteHttpproxy(httpproxyObj)
+		})
+
+		It("should handle httpproxy without VirtualHost", func() {
+			httpproxyObj := &contourv1.HTTPProxy{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: defaultNamespace,
+					Name:      "no-virtualhost",
+				},
+				Spec: contourv1.HTTPProxySpec{
+					IngressClassName: "test",
+					// No VirtualHost
+				},
+			}
+
+			Expect(k8sClient.Create(context.Background(), httpproxyObj)).To(Succeed())
+
+			time.Sleep(waitDuration)
+
+			// Should not crash, just not add to cache
+			Expect(cacheStore.Len()).To(BeNumerically(">=", 0))
+
+			deleteHttpproxy(httpproxyObj)
+		})
 	})
 })

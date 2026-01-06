@@ -9,5 +9,8 @@ ingressClasses:
 - "test"
 webhook:
   port: 8443
-  tlsCertFile: "./hack/tls.crt"
-  tlsKeyFile: "./hack/tls.key"
+  # TLS files should be mounted as secrets in production
+  # For local development, generate self-signed certs:
+  #   openssl req -x509 -newkey rsa:4096 -nodes -keyout tls.key -out tls.crt -days 365 -subj "/CN=localhost"
+  tlsCertFile: "/etc/webhook/certs/tls.crt"
+  tlsKeyFile: "/etc/webhook/certs/tls.key"

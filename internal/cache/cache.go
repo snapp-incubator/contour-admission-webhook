@@ -13,118 +13,211 @@
 package cache
 
 import (
+	"context"
 	"sync"
 	"time"
 
-	"github.com/snapp-incubator/contour-admission-webhook/pkg/utils"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-var (
-	logger = ctrl.Log.WithName("cache")
-)
+var logger = ctrl.Log.WithName("cache")
 
+// Cache provides a thread-safe in-memory cache with TTL-based expiration.
+// It stores FQDN ownership information for HTTPProxy resources.
 type Cache struct {
-	fqdnMap         map[string]*element // map[ingressClassName/FQDN]*element
-	mu              *sync.RWMutex
-	cleanUpTicker   *time.Ticker // Ticker
-	CleanUpStopChan chan bool    // Channel for stopping the ticker
+	entries         map[string]*entry
+	mu              sync.RWMutex
+	cleanupInterval time.Duration
+	stopCh          chan struct{}
+	stopped         chan struct{}
 }
 
-type element struct {
-	Value     *types.NamespacedName
-	ExpiresAt int64
+// entry represents a cache entry with optional expiration.
+type entry struct {
+	Value     types.NamespacedName
+	ExpiresAt time.Time // Zero value means no expiration (persistent)
 }
 
-func NewCache(cleanUpInterval time.Duration) *Cache {
-	cache := &Cache{
-		fqdnMap:         make(map[string]*element),
-		mu:              &sync.RWMutex{},
-		cleanUpTicker:   time.NewTicker(cleanUpInterval),
-		CleanUpStopChan: make(chan bool),
+// isPersistent returns true if this entry never expires.
+func (e *entry) isPersistent() bool {
+	return e.ExpiresAt.IsZero()
+}
+
+// isExpired returns true if this entry has expired.
+func (e *entry) isExpired(now time.Time) bool {
+	return !e.isPersistent() && now.After(e.ExpiresAt)
+}
+
+// NewCache creates a new cache with the specified cleanup interval.
+// The cleanup goroutine runs periodically to remove expired entries.
+func NewCache(cleanupInterval time.Duration) *Cache {
+	c := &Cache{
+		entries:         make(map[string]*entry),
+		cleanupInterval: cleanupInterval,
+		stopCh:          make(chan struct{}),
+		stopped:         make(chan struct{}),
 	}
 
-	cache.StartCleaner()
+	go c.runCleanupLoop()
 
-	return cache
+	return c
 }
 
-func (c *Cache) Set(key string, value *types.NamespacedName, expirationUnixTime int64) {
+// Set stores a value with an optional expiration time.
+// If expiresAt is zero, the entry is persistent (never expires).
+func (c *Cache) Set(key string, value types.NamespacedName, expiresAt time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.fqdnMap[key] = &element{
+	c.entries[key] = &entry{
 		Value:     value,
-		ExpiresAt: expirationUnixTime,
+		ExpiresAt: expiresAt,
 	}
 }
 
-func (c *Cache) Get(key string) (*types.NamespacedName, bool) {
+// SetWithTTL stores a value that expires after the specified duration.
+// If ttl is zero or negative, the entry is persistent.
+func (c *Cache) SetWithTTL(key string, value types.NamespacedName, ttl time.Duration) {
+	var expiresAt time.Time
+	if ttl > 0 {
+		expiresAt = time.Now().Add(ttl)
+	}
+	c.Set(key, value, expiresAt)
+}
+
+// SetPersistent stores a value that never expires.
+func (c *Cache) SetPersistent(key string, value types.NamespacedName) {
+	c.Set(key, value, time.Time{})
+}
+
+// Get retrieves a value from the cache.
+// Returns the value and true if found, zero value and false otherwise.
+func (c *Cache) Get(key string) (types.NamespacedName, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	element, found := c.fqdnMap[key]
+	e, found := c.entries[key]
 	if !found {
-		return nil, false
+		return types.NamespacedName{}, false
 	}
 
-	return element.Value, true
+	// Check if expired (don't delete here to avoid write lock upgrade)
+	if e.isExpired(time.Now()) {
+		return types.NamespacedName{}, false
+	}
+
+	return e.Value, true
 }
 
+// Delete removes an entry from the cache.
 func (c *Cache) Delete(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	delete(c.fqdnMap, key)
+	delete(c.entries, key)
 }
 
-func (c *Cache) KeyExists(key string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	_, found := c.fqdnMap[key]
-
+// Exists returns true if the key exists and is not expired.
+func (c *Cache) Exists(key string) bool {
+	_, found := c.Get(key)
 	return found
 }
 
-func (c *Cache) IsKeyPersisted(key string) *bool {
+// IsPersistent returns nil if key doesn't exist, otherwise returns whether the entry is persistent.
+func (c *Cache) IsPersistent(key string) *bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	entry, found := c.fqdnMap[key]
-	if !found {
+	e, found := c.entries[key]
+	if !found || e.isExpired(time.Now()) {
 		return nil
 	}
 
-	return utils.BoolPointer(entry.ExpiresAt == 0)
+	persistent := e.isPersistent()
+	return &persistent
 }
 
-func (c *Cache) StartCleaner() {
-	go func() {
-	out:
-		for {
-			select {
-			case <-c.cleanUpTicker.C:
-				c.cleanUp()
-			case <-c.CleanUpStopChan:
-				break out
-			}
+// Len returns the number of entries in the cache (including potentially expired ones).
+func (c *Cache) Len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return len(c.entries)
+}
+
+// Stop gracefully stops the cleanup goroutine.
+// It blocks until the cleanup goroutine has stopped.
+func (c *Cache) Stop() {
+	close(c.stopCh)
+	<-c.stopped
+}
+
+// StopWithContext stops the cleanup goroutine with a context for timeout.
+func (c *Cache) StopWithContext(ctx context.Context) error {
+	close(c.stopCh)
+
+	select {
+	case <-c.stopped:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// runCleanupLoop periodically removes expired entries.
+func (c *Cache) runCleanupLoop() {
+	defer close(c.stopped)
+
+	ticker := time.NewTicker(c.cleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			c.cleanup()
+		case <-c.stopCh:
+			return
 		}
-	}()
+	}
 }
 
-func (c *Cache) cleanUp() {
-	now := time.Now().Unix()
+// cleanup removes all expired entries from the cache.
+func (c *Cache) cleanup() {
+	now := time.Now()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for key, element := range c.fqdnMap {
-		if element.ExpiresAt > 0 && now >= element.ExpiresAt {
-			delete(c.fqdnMap, key)
-
-			logger.Info("cache entry is expired hence deleted", "entry", key)
+	for key, e := range c.entries {
+		if e.isExpired(now) {
+			delete(c.entries, key)
+			logger.V(1).Info("cache entry expired and deleted", "key", key)
 		}
 	}
+}
+
+// Clear removes all entries from the cache.
+func (c *Cache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.entries = make(map[string]*entry)
+}
+
+// Keys returns all non-expired keys in the cache.
+func (c *Cache) Keys() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	now := time.Now()
+	keys := make([]string, 0, len(c.entries))
+
+	for key, e := range c.entries {
+		if !e.isExpired(now) {
+			keys = append(keys, key)
+		}
+	}
+
+	return keys
 }
