@@ -36,6 +36,7 @@ import (
 	"github.com/snapp-incubator/contour-admission-webhook/internal/cache"
 	"github.com/snapp-incubator/contour-admission-webhook/internal/config"
 	controller "github.com/snapp-incubator/contour-admission-webhook/internal/controller/httpproxy"
+	"github.com/snapp-incubator/contour-admission-webhook/pkg/utils"
 )
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
@@ -59,22 +60,22 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 
-	if err := config.InitializeConfig("../../hack/config.yaml"); err != nil {
-		Expect(err).ToNot(HaveOccurred())
-	}
+	// Reset config and utils state for testing
+	config.ResetForTesting()
+	utils.ResetValidIngressClassesForTesting()
 
-	config := config.GetConfig()
+	err := config.InitializeConfig("../../hack/config.test.yaml")
+	Expect(err).ToNot(HaveOccurred())
 
-	cacheStore = cache.NewCache(time.Duration(config.Cache.CleanUpIntervalSecond) * time.Second)
+	cfg := config.GetConfig()
+
+	cacheStore = cache.NewCache(time.Duration(cfg.Cache.CleanUpIntervalSecond) * time.Second)
 
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "hack", "crd", "external")},
 		ErrorIfCRDPathMissing: true,
 	}
 
-	var err error
-
-	// cfg is defined in this file globally.
 	k8sRestCfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sRestCfg).NotTo(BeNil())
@@ -98,14 +99,20 @@ var _ = BeforeSuite(func() {
 	Expect(err).ToNot(HaveOccurred())
 
 	go func() {
+		defer GinkgoRecover()
 		err = k8sManager.Start(ctrl.SetupSignalHandler())
 		Expect(err).ToNot(HaveOccurred())
 	}()
-
 })
 
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
+
+	// Stop the cache cleanup goroutine
+	if cacheStore != nil {
+		cacheStore.Stop()
+	}
+
 	err := (func() (err error) {
 		// Need to sleep if the first stop fails due to a bug:
 		// https://github.com/kubernetes-sigs/controller-runtime/issues/1571

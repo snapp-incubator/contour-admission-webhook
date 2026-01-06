@@ -24,3 +24,16 @@ Dockerfile.cross
 *.swp
 *.swo
 *~
+
+# TLS certificates and keys - NEVER commit these
+*.key
+*.crt
+*.pem
+*.p12
+*.pfx
+hack/tls.*
+
+# Environment and secrets
+.env
+.env.*
+*.secret

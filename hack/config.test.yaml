@@ -1,0 +1,16 @@
+# Test configuration - used by unit tests
+# In tests, TLS files are not actually loaded/used
+cache:
+  cleanUpIntervalSecond: 30
+  entryTtlSecond: 10
+ingressClasses:
+- "private"
+- "inter-dc"
+- "inter-venture"
+- "public"
+- "test"
+webhook:
+  port: 8443
+  tlsCertFile: "/tmp/test-tls.crt"
+  tlsKeyFile: "/tmp/test-tls.key"
+

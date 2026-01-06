@@ -18,179 +18,193 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-var _ handler.EventHandler = &customEventHandler{}
+var _ handler.EventHandler = (*customEventHandler)(nil)
 
-func newCustomEventHandler(handler customEventHandlerFunc) handler.EventHandler {
+func newCustomEventHandler(handlerFunc customEventHandlerFunc) handler.EventHandler {
 	return &customEventHandler{
-		handler: handler,
+		handler: handlerFunc,
 	}
 }
 
 func (h *customEventHandler) Create(ctx context.Context, evt event.CreateEvent, q workqueue.RateLimitingInterface) {
-	reqs := h.handler(ctx, evt.Object, nil, createEvent)
-
-	for _, req := range reqs {
+	for _, req := range h.handler(ctx, evt.Object, nil, createEvent) {
 		q.Add(req)
 	}
 }
 
 func (h *customEventHandler) Update(ctx context.Context, evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
-	reqs := h.handler(ctx, evt.ObjectNew, evt.ObjectOld, updateEvent)
-
-	for _, req := range reqs {
+	for _, req := range h.handler(ctx, evt.ObjectNew, evt.ObjectOld, updateEvent) {
 		q.Add(req)
 	}
 }
 
 func (h *customEventHandler) Delete(ctx context.Context, evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
-	reqs := h.handler(ctx, nil, evt.Object, deleteEvent)
-
-	for _, req := range reqs {
+	for _, req := range h.handler(ctx, nil, evt.Object, deleteEvent) {
 		q.Add(req)
 	}
 }
 
 func (h *customEventHandler) Generic(_ context.Context, _ event.GenericEvent, _ workqueue.RateLimitingInterface) {
-	// no implementation yet
+	// No implementation needed for generic events
 }
 
-//nolint:varnamelen
-func (re *ReconcilerExtended) httpproxyEventHandler(ctx context.Context, objNew client.Object, objOld client.Object, et eventType) []ctrl.Request {
-	newHttpproxy, ok := objNew.(*contourv1.HTTPProxy)
-	if objNew != nil && !ok {
-		return []ctrl.Request{}
+// httpproxyEventHandler handles HTTPProxy events and updates the cache accordingly.
+func (re *ReconcilerExtended) httpproxyEventHandler(ctx context.Context, objNew, objOld client.Object, et eventType) []ctrl.Request {
+	logger := log.FromContext(ctx).WithName("httpproxy-event-handler").WithValues("event", et)
+
+	var newProxy, oldProxy *contourv1.HTTPProxy
+
+	if objNew != nil {
+		var ok bool
+		newProxy, ok = objNew.(*contourv1.HTTPProxy)
+		if !ok {
+			logger.Error(nil, "unexpected object type for new object", "type", fmt.Sprintf("%T", objNew))
+			return nil
+		}
 	}
 
-	oldHttpproxy, ok := objOld.(*contourv1.HTTPProxy)
-	if objOld != nil && !ok {
-		return []ctrl.Request{}
+	if objOld != nil {
+		var ok bool
+		oldProxy, ok = objOld.(*contourv1.HTTPProxy)
+		if !ok {
+			logger.Error(nil, "unexpected object type for old object", "type", fmt.Sprintf("%T", objOld))
+			return nil
+		}
 	}
 
-	logger := log.FromContext(ctx).WithName("httpproxy event handler").WithValues("event", et)
-
-	reqs := make([]ctrl.Request, 1)
+	// Always queue for reconciliation
+	var reqs []ctrl.Request
 
 	switch et {
 	case createEvent:
-		reqs = append(reqs, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: newHttpproxy.GetNamespace(), Name: newHttpproxy.GetName()}})
-
-		if newHttpproxy.Spec.VirtualHost == nil {
-			break
-		}
-
-		ingressClassName := utils.GetIngressClassName(newHttpproxy)
-
-		if !utils.ValidateIngressClassName(ingressClassName) {
-			logger.Info("httpproxy ingressClassName is not valid: neither cached fqdn nor queued object for reconciliation")
-
-			return []ctrl.Request{}
-		}
-
-		// The FQDN is always set and validated against pattern "^(\\*\\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$", so
-		// checking for zero value is not required as it's handled in the Kube API server before persisting in the storage.
-		fqdn := newHttpproxy.Spec.VirtualHost.Fqdn
-
-		cacheKey := utils.GenerateCacheKey(ingressClassName, fqdn)
-
-		if re.cache.KeyExists(cacheKey) {
-			isKeyPersisted := re.cache.IsKeyPersisted(cacheKey)
-			if isKeyPersisted != nil && *isKeyPersisted {
-				errMsg := fmt.Sprintf("fqdn '%s' is used in multiple httpproxies",
-					fqdn)
-
-				err := errors.New(errMsg)
-
-				logger.Error(err, "fqdn uniqueness is compromised")
-
-				break
-			}
-		}
-
-		// Add the entry to the cache with persistence.
-		re.cache.Set(cacheKey,
-			&types.NamespacedName{Namespace: newHttpproxy.GetNamespace(), Name: newHttpproxy.GetName()},
-			0,
-		)
-
+		reqs = re.handleCreate(logger, newProxy)
 	case updateEvent:
-		reqs = append(reqs, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: newHttpproxy.GetNamespace(), Name: newHttpproxy.GetName()}})
-
-		if newHttpproxy.Spec.VirtualHost == nil && oldHttpproxy.Spec.VirtualHost == nil {
-			break
-		}
-
-		oldIngressClassName := utils.GetIngressClassName(oldHttpproxy)
-
-		if newHttpproxy.Spec.VirtualHost == nil && oldHttpproxy.Spec.VirtualHost != nil {
-			// The FQDN is always set and validated against pattern "^(\\*\\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$", so
-			// checking for zero value is not required as it's handled in the Kube API server before persisting in the storage.
-			oldFqdn := oldHttpproxy.Spec.VirtualHost.Fqdn
-
-			cacheKey := utils.GenerateCacheKey(oldIngressClassName, oldFqdn)
-
-			re.cache.Delete(cacheKey)
-
-			break
-		}
-
-		newIngressClassName := utils.GetIngressClassName(newHttpproxy)
-
-		if newHttpproxy.Spec.VirtualHost != nil && oldHttpproxy.Spec.VirtualHost == nil {
-			// The FQDN is always set and validated against pattern "^(\\*\\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$", so
-			// checking for zero value is not required as it's handled in the Kube API server before persisting in the storage.
-			newFqdn := newHttpproxy.Spec.VirtualHost.Fqdn
-
-			cacheKey := utils.GenerateCacheKey(newIngressClassName, newFqdn)
-
-			// Add the entry to the cache with persistence.
-			re.cache.Set(cacheKey,
-				&types.NamespacedName{Namespace: newHttpproxy.GetNamespace(), Name: newHttpproxy.GetName()},
-				0,
-			)
-
-			break
-		}
-
-		// The FQDN is always set and validated against pattern "^(\\*\\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$", so
-		// checking for zero value is not required as it's handled in the Kube API server before persisting in the storage.
-		newFqdn := newHttpproxy.Spec.VirtualHost.Fqdn
-		oldFqdn := oldHttpproxy.Spec.VirtualHost.Fqdn
-
-		if newFqdn != oldFqdn || newIngressClassName != oldIngressClassName {
-			newCacheKey := utils.GenerateCacheKey(newIngressClassName, newFqdn)
-			oldCacheKey := utils.GenerateCacheKey(oldIngressClassName, oldFqdn)
-
-			re.cache.Set(newCacheKey,
-				&types.NamespacedName{Namespace: newHttpproxy.GetNamespace(), Name: newHttpproxy.GetName()},
-				0,
-			)
-
-			re.cache.Delete(oldCacheKey)
-		}
-
+		reqs = re.handleUpdate(logger, newProxy, oldProxy)
 	case deleteEvent:
-		reqs = append(reqs, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: oldHttpproxy.GetNamespace(), Name: oldHttpproxy.GetName()}})
-
-		if oldHttpproxy.Spec.VirtualHost == nil {
-			break
-		}
-
-		ingressClassName := utils.GetIngressClassName(oldHttpproxy)
-
-		// The FQDN is always set and validated against pattern "^(\\*\\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$", so
-		// checking for zero value is not required as it's handled in the Kube API server before persisting in the storage.
-		fqdn := oldHttpproxy.Spec.VirtualHost.Fqdn
-
-		cacheKey := utils.GenerateCacheKey(ingressClassName, fqdn)
-
-		// Remove the entry from the cache.
-		re.cache.Delete(cacheKey)
+		reqs = re.handleDelete(logger, oldProxy)
 	}
 
 	return reqs
 }
 
-// NewReconcilerExtended instantiate a new ReconcilerExtended struct and returns it.
+func (re *ReconcilerExtended) handleCreate(logger interface{ Info(string, ...interface{}) }, proxy *contourv1.HTTPProxy) []ctrl.Request {
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Namespace: proxy.GetNamespace(),
+			Name:      proxy.GetName(),
+		},
+	}
+
+	if proxy.Spec.VirtualHost == nil {
+		return []ctrl.Request{req}
+	}
+
+	ingressClassName := utils.GetIngressClassName(proxy)
+	if !utils.ValidateIngressClassName(ingressClassName) {
+		logger.Info("httpproxy has invalid ingressClassName, skipping cache update")
+		return []ctrl.Request{req}
+	}
+
+	fqdn := proxy.Spec.VirtualHost.Fqdn
+	cacheKey := utils.GenerateCacheKey(ingressClassName, fqdn)
+
+	// Check if key already exists as persistent (would indicate duplicate)
+	if isPersistent := re.cache.IsPersistent(cacheKey); isPersistent != nil && *isPersistent {
+		err := errors.New("fqdn uniqueness violation")
+		logger.Info("fqdn is already persisted in cache, possible duplicate", "fqdn", fqdn, "error", err)
+		return []ctrl.Request{req}
+	}
+
+	// Set as persistent (never expires - managed by controller)
+	re.cache.SetPersistent(cacheKey, types.NamespacedName{
+		Namespace: proxy.GetNamespace(),
+		Name:      proxy.GetName(),
+	})
+
+	return []ctrl.Request{req}
+}
+
+func (re *ReconcilerExtended) handleUpdate(logger interface{ Info(string, ...interface{}) }, newProxy, oldProxy *contourv1.HTTPProxy) []ctrl.Request {
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Namespace: newProxy.GetNamespace(),
+			Name:      newProxy.GetName(),
+		},
+	}
+
+	newHasVH := newProxy.Spec.VirtualHost != nil
+	oldHasVH := oldProxy.Spec.VirtualHost != nil
+
+	// Neither has VirtualHost - nothing to do
+	if !newHasVH && !oldHasVH {
+		return []ctrl.Request{req}
+	}
+
+	oldIngressClassName := utils.GetIngressClassName(oldProxy)
+
+	// VirtualHost removed - delete old cache entry
+	if !newHasVH && oldHasVH {
+		oldFqdn := oldProxy.Spec.VirtualHost.Fqdn
+		cacheKey := utils.GenerateCacheKey(oldIngressClassName, oldFqdn)
+		re.cache.Delete(cacheKey)
+		return []ctrl.Request{req}
+	}
+
+	newIngressClassName := utils.GetIngressClassName(newProxy)
+
+	// VirtualHost added - add new cache entry
+	if newHasVH && !oldHasVH {
+		newFqdn := newProxy.Spec.VirtualHost.Fqdn
+		cacheKey := utils.GenerateCacheKey(newIngressClassName, newFqdn)
+		re.cache.SetPersistent(cacheKey, types.NamespacedName{
+			Namespace: newProxy.GetNamespace(),
+			Name:      newProxy.GetName(),
+		})
+		return []ctrl.Request{req}
+	}
+
+	// Both have VirtualHost - check for changes
+	newFqdn := newProxy.Spec.VirtualHost.Fqdn
+	oldFqdn := oldProxy.Spec.VirtualHost.Fqdn
+
+	if newFqdn != oldFqdn || newIngressClassName != oldIngressClassName {
+		// Add new entry
+		newCacheKey := utils.GenerateCacheKey(newIngressClassName, newFqdn)
+		re.cache.SetPersistent(newCacheKey, types.NamespacedName{
+			Namespace: newProxy.GetNamespace(),
+			Name:      newProxy.GetName(),
+		})
+
+		// Delete old entry
+		oldCacheKey := utils.GenerateCacheKey(oldIngressClassName, oldFqdn)
+		re.cache.Delete(oldCacheKey)
+	}
+
+	return []ctrl.Request{req}
+}
+
+func (re *ReconcilerExtended) handleDelete(logger interface{ Info(string, ...interface{}) }, proxy *contourv1.HTTPProxy) []ctrl.Request {
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Namespace: proxy.GetNamespace(),
+			Name:      proxy.GetName(),
+		},
+	}
+
+	if proxy.Spec.VirtualHost == nil {
+		return []ctrl.Request{req}
+	}
+
+	ingressClassName := utils.GetIngressClassName(proxy)
+	fqdn := proxy.Spec.VirtualHost.Fqdn
+	cacheKey := utils.GenerateCacheKey(ingressClassName, fqdn)
+
+	re.cache.Delete(cacheKey)
+
+	return []ctrl.Request{req}
+}
+
+// NewReconcilerExtended creates a new ReconcilerExtended instance.
 func NewReconcilerExtended(mgr manager.Manager, cache *cache.Cache) *ReconcilerExtended {
 	return &ReconcilerExtended{
 		cache:  cache,
@@ -202,8 +216,6 @@ func NewReconcilerExtended(mgr manager.Manager, cache *cache.Cache) *ReconcilerE
 // SetupWithManager sets up the controller with the manager.
 func (re *ReconcilerExtended) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		// This watch EventHandler responds to create / delete / update events by *reconciling the object* ( equivalent of calling For(&contourv1.HTTPProxy{}) )
-		// in addition to handling cache update flow.
 		Watches(&contourv1.HTTPProxy{}, newCustomEventHandler(re.httpproxyEventHandler)).
 		Named("httpproxy").
 		Complete(re)

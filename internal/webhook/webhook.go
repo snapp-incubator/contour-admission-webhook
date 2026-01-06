@@ -8,7 +8,6 @@ import (
 	"time"
 
 	jsoniter "github.com/json-iterator/go"
-	"github.com/labstack/echo/v4"
 	contourv1 "github.com/projectcontour/contour/apis/projectcontour/v1"
 	"github.com/snapp-incubator/contour-admission-webhook/internal/cache"
 	"github.com/snapp-incubator/contour-admission-webhook/internal/config"
@@ -21,6 +20,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
+const (
+	contentTypeJSON     = "application/json"
+	maxRequestBodyBytes = 1 << 20 // 1 MB
+)
+
 var (
 	scheme       = runtime.NewScheme()
 	codecFactory = serializer.NewCodecFactory(scheme)
@@ -28,7 +32,7 @@ var (
 
 	json = jsoniter.ConfigCompatibleWithStandardLibrary
 
-	entryTtlSecond int
+	entryTTL time.Duration
 
 	logger = ctrl.Log.WithName("webhook")
 )
@@ -43,10 +47,9 @@ type serverOptions struct {
 }
 
 func newServerOptions(port int, cert, key string) *serverOptions {
-	//nolint:varnamelen
-	so := &serverOptions{
+	return &serverOptions{
 		secureServingOptions: apiserver_options.SecureServingOptions{
-			BindAddress: net.IP{0, 0, 0, 0},
+			BindAddress: net.IPv4zero,
 			BindPort:    port,
 			ServerCert: apiserver_options.GeneratableKeyCert{
 				CertKey: apiserver_options.CertKey{
@@ -56,8 +59,6 @@ func newServerOptions(port int, cert, key string) *serverOptions {
 			},
 		},
 	}
-
-	return so
 }
 
 type serverConfig struct {
@@ -65,133 +66,154 @@ type serverConfig struct {
 }
 
 func (so *serverOptions) newServerConfig() *serverConfig {
-	//nolint:varnamelen
 	sc := &serverConfig{}
 
 	if err := so.secureServingOptions.ApplyTo(&sc.secureServingInfo); err != nil {
-		panic(err)
+		panic(fmt.Errorf("failed to apply secure serving options: %w", err))
 	}
 
 	return sc
 }
 
-type admitV1Func func(admissionv1.AdmissionReview, *cache.Cache) (*admissionv1.AdmissionResponse, *httpErr)
+// admitFunc is the function signature for admission handlers.
+type admitFunc func(admissionv1.AdmissionReview, *cache.Cache) (*admissionv1.AdmissionResponse, *httpErr)
 
+// admissionHandler handles admission webhook requests.
 type admissionHandler struct {
 	cache   *cache.Cache
-	handler admitV1Func
+	handler admitFunc
 }
 
-var _ http.Handler = &admissionHandler{}
+var _ http.Handler = (*admissionHandler)(nil)
 
+// httpErr represents an HTTP error response.
 type httpErr struct {
 	code    int
-	message interface{}
+	message string
 }
 
-func (he httpErr) Error() string {
-	return fmt.Sprintf("code=%d, message=%v", he.code, he.message)
+func (e *httpErr) Error() string {
+	return fmt.Sprintf("code=%d, message=%s", e.code, e.message)
 }
 
-// ServeHTTP handles the http portion of a request prior to handing to an admit function.
-//
-//nolint:varnamelen
-func (ah *admissionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var body []byte
-
-	if r.Body != nil {
-		data, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("could not read request body: %s", err.Error()), http.StatusInternalServerError)
-
-			return
-		}
-
-		body = data
+func newHTTPError(code int, format string, args ...interface{}) *httpErr {
+	return &httpErr{
+		code:    code,
+		message: fmt.Sprintf(format, args...),
 	}
+}
 
-	contentType := r.Header.Get("Content-Type")
-	if contentType != echo.MIMEApplicationJSON {
-		http.Error(w, fmt.Sprintf("content-type header is %s, must be application/json", contentType), http.StatusBadRequest)
+// ServeHTTP handles the HTTP portion of a request prior to handing to an admit function.
+func (ah *admissionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Limit request body size to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to read request body: %s", err.Error()), http.StatusBadRequest)
 		return
 	}
 
-	var responseObj runtime.Object
+	contentType := r.Header.Get("Content-Type")
+	if contentType != contentTypeJSON {
+		http.Error(w, fmt.Sprintf("invalid Content-Type %q, expected %q", contentType, contentTypeJSON), http.StatusUnsupportedMediaType)
+		return
+	}
 
 	obj, gvk, err := deserializer.Decode(body, nil, nil)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("http request body could not be decoded: %s", err.Error()), http.StatusBadRequest)
-
+		http.Error(w, fmt.Sprintf("failed to decode request body: %s", err.Error()), http.StatusBadRequest)
 		return
 	}
 
 	admissionReviewRequest, ok := obj.(*admissionv1.AdmissionReview)
 	if !ok {
-		http.Error(w, fmt.Sprintf("expected v1.AdmissionReview object but got: %T object", obj), http.StatusBadRequest)
-
+		http.Error(w, fmt.Sprintf("expected AdmissionReview but got %T", obj), http.StatusBadRequest)
 		return
 	}
 
-	// Can not use the already declared err interface
-	// Impossible comparison of interface value with untyped nil
-	// https://staticcheck.dev/docs/checks#SA4023
-	admitResponse, admitHttpError := ah.handler(*admissionReviewRequest, ah.cache)
-	if admitHttpError != nil {
-		http.Error(w, admitHttpError.message.(string), admitHttpError.code)
+	if admissionReviewRequest.Request == nil {
+		http.Error(w, "admission review request is nil", http.StatusBadRequest)
+		return
 	}
 
+	// Call the handler
+	admitResponse, handlerErr := ah.handler(*admissionReviewRequest, ah.cache)
+	if handlerErr != nil {
+		http.Error(w, handlerErr.message, handlerErr.code)
+		return
+	}
+
+	if admitResponse == nil {
+		http.Error(w, "handler returned nil response", http.StatusInternalServerError)
+		return
+	}
+
+	// Build response
 	admissionReviewResponse := &admissionv1.AdmissionReview{}
 	admissionReviewResponse.SetGroupVersionKind(*gvk)
 	admissionReviewResponse.Response = admitResponse
 	admissionReviewResponse.Response.UID = admissionReviewRequest.Request.UID
-	responseObj = admissionReviewResponse
 
-	jsonData, err := json.Marshal(responseObj)
+	jsonData, err := json.Marshal(admissionReviewResponse)
 	if err != nil {
-		http.Error(w, "error encoding response json", http.StatusInternalServerError)
-
+		http.Error(w, "failed to encode response", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", contentTypeJSON)
 	w.WriteHeader(http.StatusOK)
 
-	_, err = w.Write(jsonData)
-	if err != nil {
-		logger.Error(err, "error writing the data to the connection as part of an http reply")
+	if _, err = w.Write(jsonData); err != nil {
+		logger.Error(err, "failed to write response")
 	}
 }
 
-func readinessHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
+// readinessHandler handles readiness probe requests.
+func readinessHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 
-	_, err := w.Write([]byte("ok"))
-	if err != nil {
-		logger.Error(err, "error writing the data to the connection as part of an http reply")
+	if _, err := w.Write([]byte("ok")); err != nil {
+		logger.Error(err, "failed to write readiness response")
 	}
 }
 
-func Setup(cache *cache.Cache) (<-chan struct{}, <-chan struct{}) {
-	// Populate the global variable once to prevent further resource allocations per validation request
+// livenessHandler handles liveness probe requests.
+func livenessHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+
+	if _, err := w.Write([]byte("ok")); err != nil {
+		logger.Error(err, "failed to write liveness response")
+	}
+}
+
+// Setup configures and starts the webhook server.
+// Returns channels that are closed when the server stops.
+func Setup(c *cache.Cache) (<-chan struct{}, <-chan struct{}) {
 	cfg := config.GetConfig()
-	entryTtlSecond = cfg.Cache.EntryTtlSecond
+
+	// Set the global TTL for cache entries created by the webhook
+	entryTTL = time.Duration(cfg.Cache.EntryTTLSecond) * time.Second
 
 	serverOptions := newServerOptions(cfg.Webhook.Port, cfg.Webhook.TLSCertFile, cfg.Webhook.TLSKeyFile)
-
 	serverConfig := serverOptions.newServerConfig()
 
 	mux := http.NewServeMux()
-	mux.Handle("/v1/validate", &admissionHandler{cache: cache, handler: validateV1})
-	mux.Handle("/readyz", http.HandlerFunc(readinessHandler))
+	mux.Handle("/v1/validate", &admissionHandler{cache: c, handler: validateV1})
+	mux.HandleFunc("/readyz", readinessHandler)
+	mux.HandleFunc("/healthz", livenessHandler)
 
 	stopCh := apiserver.SetupSignalHandler()
 
 	stoppedCh, listenerStoppedCh, err := serverConfig.secureServingInfo.Serve(mux, 30*time.Second, stopCh)
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("failed to start webhook server: %w", err))
 	}
+
+	logger.Info("webhook server started", "port", cfg.Webhook.Port)
 
 	return stoppedCh, listenerStoppedCh
 }
+
