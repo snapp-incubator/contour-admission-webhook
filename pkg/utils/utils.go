@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 
 	contourv1 "github.com/projectcontour/contour/apis/projectcontour/v1"
@@ -20,10 +21,17 @@ func GenerateCacheKey(ingressClassName, fqdn string) string {
 
 // GetIngressClassName extracts the ingress class name from an HTTPProxy.
 // The kubernetes.io/ingress.class annotation takes precedence over the spec field.
+// Returns empty string if httpproxy is nil.
 func GetIngressClassName(httpproxy *contourv1.HTTPProxy) string {
+	if httpproxy == nil {
+		return ""
+	}
+
 	// Check annotation first for backwards compatibility
-	if annotation, found := httpproxy.Annotations["kubernetes.io/ingress.class"]; found && annotation != "" {
-		return annotation
+	if httpproxy.Annotations != nil {
+		if annotation, found := httpproxy.Annotations["kubernetes.io/ingress.class"]; found && annotation != "" {
+			return annotation
+		}
 	}
 
 	return httpproxy.Spec.IngressClassName
@@ -37,13 +45,7 @@ func ValidateIngressClassName(ingressClassName string) bool {
 
 	loadValidIngressClasses()
 
-	for _, validClass := range validIngressClasses {
-		if ingressClassName == validClass {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(validIngressClasses, ingressClassName)
 }
 
 // loadValidIngressClasses loads the valid ingress classes from config.

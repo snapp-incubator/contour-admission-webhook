@@ -1,4 +1,76 @@
-# More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
-# Ignore build and test binaries.
+# Docker build context ignore file
+# https://docs.docker.com/engine/reference/builder/#dockerignore-file
+
+# Build artifacts
 bin/
 testbin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test outputs
+*.test
+*.out
+cover.html
+coverage.txt
+
+# Git
+.git/
+.gitignore
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# macOS
+.DS_Store
+._*
+
+# CI/CD
+.github/
+
+# Documentation (not needed in image)
+*.md
+!README.md
+docs/
+
+# Development files
+.env
+.env.*
+*.secret
+secrets/
+hack/tls.*
+*.key
+*.crt
+*.pem
+
+# Go workspace
+go.work
+go.work.sum
+vendor/
+
+# Local config
+*.local.yaml
+*.local.yml
+.local/
+
+# Temp files
+tmp/
+temp/
+*.log
+
+# Lint/Test config (not needed at runtime)
+.golangci.yml
+.editorconfig
+
+# Debug
+debug
+*.debug
+__debug_bin*

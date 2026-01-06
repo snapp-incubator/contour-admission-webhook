@@ -1,6 +1,6 @@
 module github.com/snapp-incubator/contour-admission-webhook
 
-go 1.22.0
+go 1.25.0
 
 require (
 	github.com/go-logr/logr v1.2.4
