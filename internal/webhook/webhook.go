@@ -141,6 +141,8 @@ func (ah *admissionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	admitResponse, admitHttpError := ah.handler(*admissionReviewRequest, ah.cache)
 	if admitHttpError != nil {
 		http.Error(w, admitHttpError.message.(string), admitHttpError.code)
+
+		return
 	}
 
 	admissionReviewResponse := &admissionv1.AdmissionReview{}
